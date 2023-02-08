@@ -18,6 +18,71 @@ public:
     }
 };
 
+class wBitmapHeader {
+public:  
+    void read(U32 address) {
+        biSize = readd(address);
+        biWidth = (S32)readd(address+4);
+        biHeight = (S32)readd(address+8);
+        biPlanes = readw(address+12);
+        biBitCount = readw(address+14);
+        biCompression = readd(address+16);
+        biSizeImage = readd(address+20);
+        biXPelsPerMeter = (S32)readd(address+24);
+        biYPelsPerMeter = (S32)readd(address+28);
+        biClrUsed = readd(address+32);
+        biClrImportant = readd(address+36);
+    }
+    U32 biSize;
+    S32 biWidth;
+    S32 biHeight;
+    U16 biPlanes;
+    U16 biBitCount;
+    U32 biCompression;
+    U32 biSizeImage;
+    S32 biXPelsPerMeter;
+    S32 biYPelsPerMeter;
+    U32 biClrUsed;
+    U32 biClrImportant;
+};
+
+class wRGBQUAD {
+public:
+    U8 rgbBlue;
+    U8 rgbGreen;
+    U8 rgbRed;
+    U8 rgbReserved;
+
+    void read(U32 address) {
+        rgbBlue = readb(address);
+        rgbGreen = readb(address+1);
+        rgbRed = readb(address+2);
+        rgbReserved = readb(address+3);
+    }
+
+    void write(U32 address) {
+        writeb(address, rgbBlue);
+        writeb(address+1, rgbGreen);
+        writeb(address+2, rgbRed);
+        writeb(address+3, rgbReserved);
+    }
+};
+
+class wBitmapInfo {
+public:
+    wBitmapInfo() {}
+
+    void read(U32 address) {
+        bmiHeader.read(address); address += 40;
+        for (int i = 0; i < bmiHeader.biClrUsed && i<256; i++) {
+            bmiColors[i].read(address); address += 4;
+        }
+    }
+
+    wBitmapHeader bmiHeader;
+    wRGBQUAD bmiColors[256];
+};
+
 class Wnd {
 public:
     Wnd() : surface(0) {}
@@ -63,11 +128,12 @@ public:
 
     virtual std::shared_ptr<Wnd> getWnd(U32 hwnd) = 0;
     virtual std::shared_ptr<Wnd> createWnd(KThread* thread, U32 processId, U32 hwnd, U32 windowRect, U32 clientRect) = 0;
-    virtual void bltWnd(KThread* thread, U32 hwnd, U32 bits, S32 xOrg, S32 yOrg, U32 width, U32 height, U32 rect) = 0;
+    virtual void bltWnd(KThread* thread, U32 hwnd, U32 bits, S32 xOrg, S32 yOrg, U32 width, U32 height) = 0;
     virtual void drawWnd(KThread* thread, std::shared_ptr<Wnd> w, U8* bytes, U32 pitch, U32 bpp, U32 width, U32 height) = 0;
-    virtual void drawAllWindows(KThread* thread, U32 hWnd, int count) = 0;
+    virtual void drawAllWindows(KThread* thread, U32 hWnd, U32 hWndCount, U32 rects, U32 rectCount) = 0;
     virtual void setTitle(const std::string& title) = 0;
-
+    virtual bool readPixels(U32 x, U32 y, U32 width, U32 height, U32 pitch, U32 bpp, U32* palette, U32 numberOfPaletteColors, U8* pixels) = 0;
+    virtual void writePixels(wRECT* srcRect, wRECT* dstRect, wBitmapInfo* info, U32 pixels) = 0;
     virtual U32 getGammaRamp(U32 ramp) = 0;
 
     virtual U32 glCreateContext(KThread* thread, std::shared_ptr<Wnd> wnd, int major, int minor, int profile, int flags) = 0;

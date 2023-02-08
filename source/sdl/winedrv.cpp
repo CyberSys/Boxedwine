@@ -21,6 +21,9 @@
 #include "knativewindow.h"
 #include "knativesystem.h"
 
+static U32 palette[256];
+static U32 numberOfPaletteColors;
+
 static void notImplemented(const char* s) {
     kwarn(s);
 }
@@ -153,6 +156,9 @@ static void notImplemented(const char* s) {
 #define BOXED_VK_GET_PHYSICAL_DEVICE_SURFACE_CAPABILITIES2   (BOXED_BASE+105)
 #define BOXED_VK_GET_PHYSICAL_DEVICE_SURFACE_FORMATS2 (BOXED_BASE+106)
 #define BOXED_VK_GET_NATIVE_SURFACE                  (BOXED_BASE+107)
+
+#define BOXED_GET_IMAGE                               (BOXED_BASE+108)
+#define BOXED_PUT_IMAGE                           (BOXED_BASE+109)
 
 # define __MSABI_LONG(x)         x
 
@@ -1699,6 +1705,165 @@ void boxeddrv_GetVersion(CPU* cpu) {
     EAX = 3;
 }
 
+// ARG1 BITMAPINFO*
+// ARG2 struct gdi_image_bits*
+// ARG3 struct bitblt_coords*
+void boxeddrv_GetImage(CPU* cpu) {
+    U32 addressBitmapInfo = ARG1;
+    U32 addressBits = ARG2;
+    U32 addressCoords = ARG3;
+    U32 bitsSize = ARG4;
+    U32 bpp = KNativeWindow::getNativeWindow()->screenBpp(); // :TODO: how can I assume this DC is really the same as the screen
+
+    writed(addressBitmapInfo, 40); // info->bmiHeader.biSize = sizeof(info->bmiHeader);
+    writed(addressBitmapInfo+12, 1); // info->bmiHeader.biPlanes
+    writed(addressBitmapInfo + 14, bpp); // info->bmiHeader.biBitCount
+    writed(addressBitmapInfo + 16, 0); // info->bmiHeader.biCompression, 0 = BI_RGB
+    writed(addressBitmapInfo + 24, 0); // info->bmiHeader.biXPelsPerMeter
+    writed(addressBitmapInfo + 28, 0); // info->bmiHeader.biYPelsPerMeter
+    writed(addressBitmapInfo + 32, 0); // info->bmiHeader.biClrUsed
+    writed(addressBitmapInfo + 36, 0); // info->bmiHeader.biClrImportant
+    
+    U32 align = 0;
+
+    switch (bpp)
+    {
+    case 1:  
+        align = 32; 
+        break;
+    case 4:  
+    case 8:  
+    {
+        if (bpp == 4) {
+            align = 8;
+        }
+        else {
+            align = 4;
+        }
+        // wine wants this to be 0 instead of 256/16 which means the same thing
+        // writed(addressBitmapInfo + 32, 1 << bpp); // info->bmiHeader.biClrUsed
+        U32 p = addressBitmapInfo + 40;
+        for (int i = 0; i < numberOfPaletteColors; i++)
+        {
+            writeb(p++, (U8)(palette[i] >> 16)); // blue           
+            writeb(p++, (U8)(palette[i] >> 8)); // green                       
+            writeb(p++, (U8)palette[i]); // red
+            writeb(p++, 0);
+        }
+        U32 extra = (1 << bpp) - numberOfPaletteColors;
+        zeroMemory(p, extra * 4);
+        break;
+    }
+    case 16: 
+    {
+        align = 2;
+        writed(addressBitmapInfo + 16, 3); // info->bmiHeader.biCompression, 3 = BI_BITFIELDS
+        U32 p = addressBitmapInfo + 40;
+        writed(p, 0xF800); p += 4;
+        writed(p, 0x07E0); p += 4;
+        writed(p, 0x001F);
+        break;
+    }
+    case 24: 
+        align = 4;  
+        break;
+    case 32: 
+        align = 1;  
+        /*
+        if (colors[0] != 0xff0000 || colors[1] != 0x00ff00 || colors[2] != 0x0000ff || !has_alpha)
+            writed(addressBitmapInfo + 16, 3); // info->bmiHeader.biCompression, 3 = BI_BITFIELDS
+            */
+        break;
+    default:
+        EAX = 11; // ERROR_BAD_FORMAT;
+        return;
+    }
+
+    if (!addressBits) {
+        EAX = 0;
+        return;  /* just querying the color information */
+    }
+    S32 visRectLeft = readd(addressCoords+32);
+    S32 visRectTop = readd(addressCoords+36);
+    S32 visRectRight = readd(addressCoords+40);
+    S32 visRectBottom = readd(addressCoords+44);
+
+    S32 x = visRectLeft;
+    S32 y = visRectTop;
+    S32 width = visRectRight - x;
+    S32 height = visRectBottom - y;
+    //if (format->scanline_pad != 32) {
+        width = (width + (align - 1)) & ~(align - 1);
+    //}
+    /* make the source rectangle relative to the returned bits */
+    writed(addressCoords + 16, readd(addressCoords + 16) - x); // src->x -= x;
+    writed(addressCoords + 20, readd(addressCoords + 20) - y); // src->y -= y;
+    // OffsetRect(&src->visrect, -x, -y);
+    writed(addressCoords + 32, readd(addressCoords + 32) - x);
+    writed(addressCoords + 36, readd(addressCoords + 36) - y);
+
+    U32 imageSize = height * width * bpp / 8;
+    writed(addressBitmapInfo+4, width); // info->bmiHeader.biWidth
+    writed(addressBitmapInfo+8, -height); // info->bmiHeader.biHeight
+    writed(addressBitmapInfo+20, imageSize); // info->bmiHeader.biSizeImage
+
+    U32 addressPixels = readd(addressBits);
+    U32 isCopy = readd(addressBits+4);
+    U32 freePixels = readd(addressBits+8);
+    bool result = false;
+    if (KThread::currentThread()->memory->isValidWriteAddress(addressPixels, imageSize)) {
+        U8* pixels = getPhysicalWriteAddress(addressPixels, imageSize);
+        bool deletePixels = false;
+        if (!pixels) {
+            pixels = new U8[imageSize];
+            deletePixels = true;
+        }
+        result = KNativeWindow::getNativeWindow()->readPixels(x, y, width, height, width * bpp / 8, bpp, palette, numberOfPaletteColors, pixels);
+        if (deletePixels) {
+            if (result) {
+                memcopyFromNative(addressPixels, pixels, imageSize);
+            }
+            delete[] pixels;
+        }
+    }
+    if (result) {
+        EAX = 0;
+    } else {
+        EAX = 1;
+    }
+
+}
+
+// ARG1 BITMAPINFO*
+// ARG2 const struct gdi_image_bits* bits
+// ARG3 struct bitblt_coords* src
+// ARG4 struct bitblt_coords* dst
+// ARG5 DWORD rop
+void boxeddrv_PutImage(CPU* cpu) {
+    U32 addressBitmapInfo = ARG1;
+    U32 addressBits = ARG2;
+    U32 addressSrc = ARG3;
+    U32 addressDest = ARG4;
+    U32 rop = ARG5;
+    U32 srcWidth = readd(addressSrc + 24);
+    U32 srcHeight = readd(addressSrc + 28);
+    U32 dstWidth = readd(addressSrc + 24);
+    U32 dstHeight = readd(addressSrc + 28);
+
+    wRECT srcRect;
+    wRECT dstRect;
+    wBitmapInfo info;
+    U32 pixels = readd(addressBits);
+    srcRect.readRect(addressSrc + 32);
+    dstRect.readRect(addressDest + 32);
+    info.read(addressBitmapInfo);
+
+    KNativeWindow::getNativeWindow()->writePixels(&srcRect, &dstRect, &info, pixels);
+
+    EAX = 0;
+}
+
+
 #ifdef BOXEDWINE_VULKAN
 #include <SDL_vulkan.h>
 #include "../vulkan/vk_host.h"
@@ -2100,10 +2265,8 @@ void boxeddrv_UnregisterHotKey(CPU* cpu) {
 void boxeddrv_FlushSurface(CPU* cpu) {
     U32 i;
 
-    for (i=0;i<ARG9;i++) {
-        KNativeWindow::getNativeWindow()->bltWnd(cpu->thread, ARG1, ARG2, ARG3, ARG4, ARG5, ARG6, ARG8+16*i);
-    }
-    KNativeWindow::getNativeWindow()->drawAllWindows(cpu->thread, ARG7+4, readd(ARG7));
+    KNativeWindow::getNativeWindow()->bltWnd(cpu->thread, ARG1, ARG2, ARG3, ARG4, ARG5, ARG6);
+    KNativeWindow::getNativeWindow()->drawAllWindows(cpu->thread, ARG7+4, readd(ARG7), ARG8, ARG9);
 }
 
 void boxeddrv_CreateDC(CPU* cpu) {
@@ -2121,12 +2284,23 @@ void boxeddrv_GetNearestColor(CPU* cpu) {
 }
 
 void boxeddrv_RealizePalette(CPU* cpu) {
-    //klog("RealizePalette not implemented");
-    EAX = 0;
+    U32 numberOfEntries = ARG1;
+    U32 addressEntries = ARG2; // PALETTEENTRY {R,G,B,Flags}
+    U32 primary = ARG3;
+
+    if (primary) {
+        numberOfPaletteColors = numberOfEntries;
+        if (numberOfPaletteColors > 256) {
+            numberOfPaletteColors = 256;
+        }
+        for (int i = 0; i < numberOfPaletteColors; i++) {
+            palette[i] = readd(addressEntries + i * 4);
+        }
+    }
+    EAX = numberOfPaletteColors;
 }
 
 void boxeddrv_RealizeDefaultPalette(CPU* cpu) {
-    //klog("RealizeDefaultPalette not implemented");
     EAX = 0;
 }
 
@@ -2148,7 +2322,7 @@ U32 wine_callbackSize;
 
 void initWine() {
 	if (!wine_callback) {
-		wine_callback = new Int99Callback[108];
+		wine_callback = new Int99Callback[110];
 		wine_callback[BOXED_ACQUIRE_CLIPBOARD] = boxeddrv_AcquireClipboard;
 		wine_callback[BOXED_ACTIVATE_KEYBOARD_LAYOUT] = boxeddrv_ActivateKeyboardLayout;
 		wine_callback[BOXED_BEEP] = boxeddrv_Beep;
@@ -2238,6 +2412,8 @@ void initWine() {
 		wine_callback[BOXED_CREATE_DESKTOP] = boxeddrv_CreateDesktop;
 		wine_callback[BOXED_HAS_WND] = boxeddrv_HasWnd;
 		wine_callback[BOXED_GET_VERSION] = boxeddrv_GetVersion;
+        wine_callback[BOXED_GET_IMAGE] = boxeddrv_GetImage;
+        wine_callback[BOXED_PUT_IMAGE] = boxeddrv_PutImage;
 
         wine_callback[BOXED_VK_CREATE_INSTANCE] = boxeddrv_vkCreateInstance;
         wine_callback[BOXED_VK_CREATE_SWAPCHAIN] = boxeddrv_vkCreateSwapChain;
@@ -2259,6 +2435,6 @@ void initWine() {
         wine_callback[BOXED_VK_GET_PHYSICAL_DEVICE_SURFACE_FORMATS2] = boxeddrv_vkGetPhysicalDeviceSurfaceFormats2;
         wine_callback[BOXED_VK_GET_NATIVE_SURFACE] = boxeddrv_vkGetNativeSurface;
 
-		wine_callbackSize = 108;
+		wine_callbackSize = 110;
 	}
 }

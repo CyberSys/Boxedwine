@@ -251,8 +251,6 @@ static void boxeddrv_surface_flush(struct window_surface *window_surface)
     }
     update_blit_data(surface);
     reset_bounds(&surface->bounds);
-    window_surface->funcs->unlock(window_surface);	
-
     if (surface->blit_data)
     {
         RECT r;
@@ -262,6 +260,7 @@ static void boxeddrv_surface_flush(struct window_surface *window_surface)
             boxeddrv_FlushSurface(surface->window, surface->bits, r.left, r.top, surface->info.bmiHeader.biWidth, surface->info.bmiHeader.biHeight, (RECT*)surface->blit_data->Buffer, surface->blit_data->rdh.nCount);
         }
     }
+    window_surface->funcs->unlock(window_surface); 
 }
 
 /***********************************************************************

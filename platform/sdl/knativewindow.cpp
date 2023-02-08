@@ -91,6 +91,17 @@ U32 KNativeWindow::defaultScreenBpp = 32;
 bool KNativeWindow::windowUpdated = false;
 U32 sdlCustomEvent;
 
+class KDesktopWindow {
+public:
+    KDesktopWindow() : lastDesktopTextureUpdate(0), desktopTexture(0) {
+    }
+
+    U32 lastDesktopTextureUpdate;
+    SDL_Texture* desktopTexture;
+    SDL_Rect desktopTextureSrc;
+    SDL_Rect desktopTextureDst;
+};
+
 class KNativeWindowSdl : public KNativeWindow, public std::enable_shared_from_this<KNativeWindowSdl> {
 public:
     KNativeWindowSdl() : scaleX(100), scaleXOffset(0), scaleY(100), scaleYOffset(0), sdlDesktopWidth(0), sdlDesktopHeight(0), fullScreen(FULLSCREEN_NOTSET), vsync(VSYNC_DEFAULT), window(NULL), renderer(NULL), shutdownWindow(NULL), shutdownRenderer(NULL), currentContext(NULL), contextCount(0), windowIsGL(false), glWindowVersionMajor(0), windowIsHidden(false), timeToHideUI(0), timeWindowWasCreated(0)
@@ -138,6 +149,7 @@ public:
     std::unordered_map<std::string, SDL_Cursor*> cursors;
     std::unordered_map<U32, std::shared_ptr<WndSdl>> hwndToWnd;
     BOXEDWINE_MUTEX hwndToWndMutex;
+    KDesktopWindow desktopWindow;
 
     void screenResized(KThread* thread);
 
@@ -171,9 +183,11 @@ public:
 
     virtual std::shared_ptr<Wnd> getWnd(U32 hwnd);
     virtual std::shared_ptr<Wnd> createWnd(KThread* thread, U32 processId, U32 hwnd, U32 windowRect, U32 clientRect);
-    virtual void bltWnd(KThread* thread, U32 hwnd, U32 bits, S32 xOrg, S32 yOrg, U32 width, U32 height, U32 rect);
+    virtual void bltWnd(KThread* thread, U32 hwnd, U32 bits, S32 xOrg, S32 yOrg, U32 width, U32 height);
     virtual void drawWnd(KThread* thread, std::shared_ptr<Wnd> w, U8* bytes, U32 pitch, U32 bpp, U32 width, U32 height);
-    virtual void drawAllWindows(KThread* thread, U32 hWnd, int count);
+    virtual void drawAllWindows(KThread* thread, U32 hWnd, U32 hWndCount, U32 rects, U32 rectCount);
+    virtual bool readPixels(U32 x, U32 y, U32 width, U32 height, U32 pitch, U32 bpp, U32* palette, U32 numberOfPaletteColors, U8* pixels);
+    virtual void writePixels(wRECT* srcRect, wRECT* dstRect, wBitmapInfo* info, U32 pixels);
     virtual void setTitle(const std::string& title);
 
     virtual U32 getGammaRamp(U32 ramp);
@@ -865,7 +879,7 @@ void KNativeWindowSdl::glSwapBuffers(KThread* thread) {
 static S8 sdlBuffer[1024*1024*4];
 #endif
 
-void KNativeWindowSdl::bltWnd(KThread* thread, U32 hwnd, U32 bits, S32 xOrg, S32 yOrg, U32 width, U32 height, U32 rect) {
+void KNativeWindowSdl::bltWnd(KThread* thread, U32 hwnd, U32 bits, S32 xOrg, S32 yOrg, U32 width, U32 height) {
     if (!firstWindowCreated) {
         BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(sdlMutex);
         DISPATCH_MAIN_THREAD_BLOCK_BEGIN
@@ -875,7 +889,6 @@ void KNativeWindowSdl::bltWnd(KThread* thread, U32 hwnd, U32 bits, S32 xOrg, S32
     
     BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(sdlMutex);
     std::shared_ptr<WndSdl> wnd = getWndSdl(hwnd);
-    wRECT r;
     int bpp = screenBpp()==8?32:screenBpp();
     int pitch = (width*((bpp+7)/8)+3) & ~3;
 
@@ -891,8 +904,7 @@ void KNativeWindowSdl::bltWnd(KThread* thread, U32 hwnd, U32 bits, S32 xOrg, S32
             wnd = getWndSdl(hwnd); // just in case it changed when we gave up the lock
         }
     }
-    preDrawWindow();
-    r.readRect(rect);    
+    preDrawWindow();   
     if (wnd)
     {
         SDL_Texture *sdlTexture = NULL;
@@ -1047,7 +1059,164 @@ U8* recorderBuffer;
 U32 recorderBufferSize;
 #endif
 
-void KNativeWindowSdl::drawAllWindows(KThread* thread, U32 hWnd, int count) {
+void KNativeWindowSdl::writePixels(wRECT* srcRect, wRECT* dstRect, wBitmapInfo* info, U32 pixelsAddress) {        
+    BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(sdlMutex);
+
+    DISPATCH_MAIN_THREAD_BLOCK_BEGIN
+    U32 format = 0;
+    SDL_Palette* sdlPalette = NULL;    
+
+    switch (info->bmiHeader.biBitCount) {
+    case 8:
+        format = SDL_PIXELFORMAT_INDEX8;
+        if (info->bmiHeader.biClrUsed > 0) {
+            sdlPalette = SDL_AllocPalette(info->bmiHeader.biClrUsed);
+            SDL_Color* colors = new SDL_Color[info->bmiHeader.biClrUsed];
+            for (int i = 0; i < info->bmiHeader.biClrUsed; i++) {
+                colors[i].r = info->bmiColors[i].rgbRed;
+                colors[i].g = info->bmiColors[i].rgbGreen;
+                colors[i].b = info->bmiColors[i].rgbBlue;
+                colors[i].a = 0xFF;
+            }
+            SDL_SetPaletteColors(sdlPalette, colors, 0, info->bmiHeader.biClrUsed);
+            delete[] colors;
+        }
+        break;
+    case 15:
+        format = SDL_PIXELFORMAT_RGB555;
+        break;
+    case 16:
+        format = SDL_PIXELFORMAT_RGB565;
+        break;
+    case 24:
+        format = SDL_PIXELFORMAT_RGB24;
+        break;
+    case 32:
+        format = SDL_PIXELFORMAT_RGBA32;
+        break;
+    }    
+    if (KThread::currentThread()->memory->isValidReadAddress(pixelsAddress, info->bmiHeader.biSizeImage)) {
+        U8* pixels = getPhysicalReadAddress(pixelsAddress, info->bmiHeader.biSizeImage);
+        bool deletePixels = false;
+        if (!pixels) {
+            pixels = new U8[info->bmiHeader.biSizeImage];
+            memcopyToNative(pixelsAddress, pixels, info->bmiHeader.biSizeImage);
+            deletePixels = true;
+        }
+        SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(pixels, info->bmiHeader.biWidth, -info->bmiHeader.biHeight, info->bmiHeader.biBitCount, (info->bmiHeader.biWidth + 3) / 4 * 4, format);
+        if (sdlPalette) {
+            SDL_SetSurfacePalette(surface, sdlPalette);
+        }
+        if (desktopWindow.desktopTexture) {
+            SDL_DestroyTexture(desktopWindow.desktopTexture);
+        }
+
+        desktopWindow.lastDesktopTextureUpdate = KSystem::getMilliesSinceStart();
+        desktopWindow.desktopTexture = SDL_CreateTextureFromSurface(renderer, surface);
+        desktopWindow.desktopTextureSrc.x = srcRect->left;
+        desktopWindow.desktopTextureSrc.y = srcRect->top;
+        desktopWindow.desktopTextureSrc.w = srcRect->right - srcRect->left;
+        desktopWindow.desktopTextureSrc.h = srcRect->bottom - srcRect->top;
+        desktopWindow.desktopTextureDst.x = dstRect->left * (int)scaleX / 100 + scaleXOffset;
+        desktopWindow.desktopTextureDst.y = dstRect->top * (int)scaleX / 100 + scaleYOffset;
+        desktopWindow.desktopTextureDst.w = (dstRect->right - dstRect->left) * (int)scaleX / 100;
+        desktopWindow.desktopTextureDst.h = (dstRect->bottom - dstRect->top) * (int)scaleX / 100;
+        SDL_RenderCopyEx(renderer, desktopWindow.desktopTexture, &desktopWindow.desktopTextureSrc, &desktopWindow.desktopTextureDst, 0, NULL, SDL_FLIP_NONE);
+        SDL_RenderPresent(renderer);
+        SDL_FreeSurface(surface);
+        if (sdlPalette) {
+            SDL_FreePalette(sdlPalette);
+        }
+        if (deletePixels) {
+            delete[] pixels;
+        }
+    }
+    DISPATCH_MAIN_THREAD_BLOCK_END
+}
+
+bool KNativeWindowSdl::readPixels(U32 x, U32 y, U32 width, U32 height, U32 pitch, U32 bpp, U32* palette, U32 numberOfPaletteColors, U8* pixels) {
+    SDL_Rect rect;
+    static bool result;
+
+    rect.x = x;
+    rect.y = y;
+    rect.w = width;
+    rect.h = height;
+
+    BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(sdlMutex);
+    U32 format = 0;
+
+    result = false;
+    switch (bpp) {
+    case 8:
+        format = SDL_PIXELFORMAT_INDEX8;
+        if (numberOfPaletteColors > 0) {
+            DISPATCH_MAIN_THREAD_BLOCK_BEGIN
+            SDL_Palette* sdlPalette = SDL_AllocPalette(numberOfPaletteColors);
+            SDL_Color* colors = new SDL_Color[numberOfPaletteColors];
+            for (int i = 0; i < numberOfPaletteColors; i++) {
+                colors[i].r = palette[i] & 0xFF;
+                colors[i].g = (palette[i] >> 8) & 0xFF;
+                colors[i].b = (palette[i] >> 16) & 0xFF;
+                colors[i].a = 0xFF;
+            }
+            SDL_SetPaletteColors(sdlPalette, colors, 0, numberOfPaletteColors);
+            SDL_PixelFormat* toFormat = SDL_AllocFormat(SDL_PIXELFORMAT_INDEX8);
+            SDL_SetPixelFormatPalette(toFormat, sdlPalette);
+            U8* p = new U8[height * width * 4];
+
+            std::shared_ptr<WndSdl> wnd = getWndFromPoint(x, y);
+            if (wnd && wnd->sdlTextureHeight == this->height && wnd->sdlTextureWidth == this->width) {
+                SDL_Rect dstrect;
+                dstrect.x = wnd->windowRect.left * (int)scaleX / 100 + scaleXOffset;
+                dstrect.y = wnd->windowRect.top * (int)scaleY / 100 + scaleYOffset;
+                dstrect.w = wnd->sdlTextureWidth * (int)scaleX / 100;
+                dstrect.h = wnd->sdlTextureHeight * (int)scaleY / 100;
+                SDL_RenderCopyEx(renderer, wnd->sdlTexture, NULL, &dstrect, 0, NULL, SDL_FLIP_VERTICAL);
+            }
+            if (SDL_RenderReadPixels(renderer, &rect, SDL_PIXELFORMAT_RGBA32, p, width * 4) == 0) {
+                U8* from = p;
+                for (int y = 0; y < height; y++) {
+                    U8* to = &pixels[pitch * y];
+                    for (int x = 0; x < width; x++) {
+                        to[x] = SDL_MapRGBA(toFormat, from[0], from[1], from[2], 0xFF);
+                        from += 4;
+                    }
+                }
+                SDL_FreeFormat(toFormat);
+                delete[] colors;
+                delete[] p;
+                SDL_FreePalette(sdlPalette);
+                result = true;
+            }
+            DISPATCH_MAIN_THREAD_BLOCK_END
+            return result;
+        }
+        break;
+    case 15:
+        format = SDL_PIXELFORMAT_RGB555;
+        break;
+    case 16:
+        format = SDL_PIXELFORMAT_RGB565;
+        break;
+    case 24:
+        format = SDL_PIXELFORMAT_RGB24;
+        break;
+    case 32:
+        format = SDL_PIXELFORMAT_RGBA32;
+        break;
+    }
+    DISPATCH_MAIN_THREAD_BLOCK_BEGIN
+    if (SDL_RenderReadPixels(renderer, &rect, format, pixels, pitch) == 0) {
+        result = true;
+    }
+    DISPATCH_MAIN_THREAD_BLOCK_END
+    return result;
+}
+
+void KNativeWindowSdl::drawAllWindows(KThread* thread, U32 hWnd, U32 hWndCount, U32 rects, U32 rectCount) {
+    wRECT r;
+    r.readRect(rects);
     if (KSystem::skipFrameFPS) {
         static U64 lastUpdate=0;
         static U64 diff = 100000 / KSystem::skipFrameFPS;
@@ -1083,7 +1252,7 @@ void KNativeWindowSdl::drawAllWindows(KThread* thread, U32 hWnd, int count) {
         } else {
             memset(recorderBuffer, 0, recorderBufferSize);
         }        
-        for (int i=count-1;i>=0;i--) {
+        for (int i=hWndCount-1;i>=0;i--) {
             std::shared_ptr<WndSdl> wnd = getWndSdl(readd(hWnd+i*4));
             if (wnd && wnd->sdlTextureWidth) {
                 int width = wnd->sdlTextureWidth;
@@ -1131,7 +1300,7 @@ void KNativeWindowSdl::drawAllWindows(KThread* thread, U32 hWnd, int count) {
             ChangeThread t(thread);
             SDL_SetRenderDrawColor(renderer, 58, 110, 165, 255 );
             SDL_RenderClear(renderer);
-            for (int i=count-1;i>=0;i--) {
+            for (int i=hWndCount-1;i>=0;i--) {
                 std::shared_ptr<WndSdl> wnd = getWndSdl(readd(hWnd+i*4));
                 if (wnd && wnd->sdlTextureWidth && wnd->sdlTexture) {
                     SDL_Rect dstrect;
@@ -1157,6 +1326,9 @@ void KNativeWindowSdl::drawAllWindows(KThread* thread, U32 hWnd, int count) {
                 rect.x = sdlDesktopWidth - scaleXOffset;
                 SDL_RenderFillRect(renderer, &rect);
             }
+        }
+        if (desktopWindow.lastDesktopTextureUpdate != 0 && desktopWindow.lastDesktopTextureUpdate + 5000 > KSystem::getMilliesSinceStart()) {
+            SDL_RenderCopyEx(renderer, desktopWindow.desktopTexture, &desktopWindow.desktopTextureSrc, &desktopWindow.desktopTextureDst, 0, NULL, SDL_FLIP_NONE);
         }
         SDL_RenderPresent(renderer);
         DISPATCH_MAIN_THREAD_BLOCK_END

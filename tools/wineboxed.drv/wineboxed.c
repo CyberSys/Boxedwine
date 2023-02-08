@@ -181,6 +181,8 @@ typedef struct
 #define BOXED_CREATE_DESKTOP                        (BOXED_BASE+86)
 #define BOXED_HAS_WND                               (BOXED_BASE+87)
 #define BOXED_GET_VERSION                           (BOXED_BASE+88)
+#define BOXED_GET_IMAGE                             (BOXED_BASE+108)
+#define BOXED_PUT_IMAGE                             (BOXED_BASE+109)
 
 #define CALL_0(index) __asm__("push %1\n\tint $0x98\n\taddl $4, %%esp": "=a" (result):"i"(index):); 
 #define CALL_1(index, arg1) __asm__("push %2\n\tpush %1\n\tint $0x98\n\taddl $8, %%esp": "=a" (result):"i"(index), "g"((DWORD)arg1):); 
@@ -1793,7 +1795,7 @@ UINT WINE_CDECL boxeddrv_RealizePalette( PHYSDEV dev, HPALETTE hpal, BOOL primar
         num_entries = 256;
     }
     if (!(num_entries = GetPaletteEntries( hpal, 0, num_entries, entries ))) return 0;
-    CALL_2(BOXED_REALIZE_PALETTE, (DWORD)num_entries, entries);
+    CALL_3(BOXED_REALIZE_PALETTE, (DWORD)num_entries, entries, primary);
     TRACE("num_entries=%d entries=%p result=%d\n", num_entries, entries, result);
     return result;
 }
@@ -1820,13 +1822,46 @@ COLORREF WINE_CDECL boxeddrv_GetNearestColor( PHYSDEV dev, COLORREF color )
 
 UINT WINE_CDECL boxeddrv_RealizeDefaultPalette( PHYSDEV dev )
 {
-    PALETTEENTRY entries[256];
-    int count;
-    UINT result;
+    if (GetObjectType(dev->hdc) != OBJ_MEMDC) {
+        PALETTEENTRY entries[256];
+        int count;
+        UINT result;
 
-    count = GetPaletteEntries( GetStockObject(DEFAULT_PALETTE), 0, 256, entries );
-    CALL_2(BOXED_REALIZE_DEFAULT_PALETTE, count, entries);
-    TRACE("dev=%p result=%d\n",dev, result);
+        count = GetPaletteEntries(GetStockObject(DEFAULT_PALETTE), 0, 256, entries);
+        CALL_2(BOXED_REALIZE_DEFAULT_PALETTE, count, entries);
+        TRACE("dev=%p result=%d\n", dev, result);
+        return result;
+    }
+    return 0;
+}
+
+void CDECL free_heap_bits( struct gdi_image_bits *bits )
+{
+    HeapFree( GetProcessHeap(), 0, bits->ptr );
+}
+
+DWORD CDECL boxeddrv_GetImage( PHYSDEV dev, BITMAPINFO *info, struct gdi_image_bits *bits, struct bitblt_coords *src ) {
+    DWORD result;
+    char* buffer = NULL;
+    DWORD imageSize = 0;
+    //boxeddrv_RealizePalette(dev, GetCurrentObject( dev->hdc, OBJ_PAL), TRUE);
+    if (bits) {
+        DWORD width = src->visrect.right - src->visrect.left + 7; // 7 just for padding
+        DWORD height = src->visrect.bottom - src->visrect.top;
+        imageSize = width * height * 4; // 4 for maximum pixel size
+        bits->ptr = HeapAlloc( GetProcessHeap(), 0, imageSize );
+        bits->is_copy = TRUE;
+        bits->free = free_heap_bits;
+    }
+    CALL_4(BOXED_GET_IMAGE, info, bits, src, imageSize);
+    return result;
+}
+
+DWORD CDECL boxeddrv_PutImage( PHYSDEV dev, HRGN clip, BITMAPINFO *info,
+                             const struct gdi_image_bits *bits, struct bitblt_coords *src,
+                             struct bitblt_coords *dst, DWORD rop ) {
+    DWORD result;
+    CALL_5(BOXED_PUT_IMAGE, info, bits, src, dst, rop);
     return result;
 }
 
@@ -1911,7 +1946,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -1942,7 +1977,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolygon */
     NULL,                                   /* pPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -2046,7 +2081,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -2077,7 +2112,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolygon */
     NULL,                                   /* pPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -2181,7 +2216,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -2212,7 +2247,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolygon */
     NULL,                                   /* pPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -2318,7 +2353,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -2349,7 +2384,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolygon */
     NULL,                                   /* pPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -2460,7 +2495,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -2491,7 +2526,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolygon */
     NULL,                                   /* pPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -2599,7 +2634,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -2628,7 +2663,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -2736,7 +2771,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -2765,7 +2800,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -2870,7 +2905,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -2899,7 +2934,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3000,7 +3035,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3029,7 +3064,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3127,7 +3162,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3154,7 +3189,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3252,7 +3287,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3279,7 +3314,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3372,7 +3407,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3399,7 +3434,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3490,7 +3525,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3515,7 +3550,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3601,7 +3636,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3625,7 +3660,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3709,7 +3744,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3733,7 +3768,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3815,7 +3850,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3839,7 +3874,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -3920,7 +3955,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -3944,7 +3979,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -4024,7 +4059,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -4048,7 +4083,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -4128,7 +4163,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -4152,7 +4187,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -4232,7 +4267,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -4256,7 +4291,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -4335,7 +4370,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -4359,7 +4394,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -4436,7 +4471,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -4460,7 +4495,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -4537,7 +4572,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pGetGlyphIndices */
     NULL,                                   /* pGetGlyphOutline */
     NULL,                                   /* pGetICMProfile */
-    NULL,                                   /* pGetImage */
+    boxeddrv_GetImage,                      /* pGetImage */
     NULL,                                   /* pGetKerningPairs */
     boxeddrv_GetNearestColor,               /* pGetNearestColor */
     NULL,                                   /* pGetOutlineTextMetrics */
@@ -4561,7 +4596,7 @@ static const struct gdi_dc_funcs boxeddrv_funcs =
     NULL,                                   /* pPolyPolygon */
     NULL,                                   /* pPolyPolyline */
     NULL,                                   /* pPolylineTo */
-    NULL,                                   /* pPutImage */
+    boxeddrv_PutImage,                      /* pPutImage */
     boxeddrv_RealizeDefaultPalette,         /* pRealizeDefaultPalette */
     boxeddrv_RealizePalette,                /* pRealizePalette */
     NULL,                                   /* pRectangle */
@@ -4604,8 +4639,10 @@ static const struct user_driver_funcs boxeddrv_funcs =
     .dc_funcs.pDeleteDC = boxeddrv_DeleteDC,
     .dc_funcs.pGetDeviceCaps = boxeddrv_GetDeviceCaps,
     .dc_funcs.pGetDeviceGammaRamp = boxeddrv_GetDeviceGammaRamp,
+    .dc_funcs.pGetImage = boxeddrv_GetImage,
     .dc_funcs.pGetNearestColor = boxeddrv_GetNearestColor,
     .dc_funcs.pGetSystemPaletteEntries = boxeddrv_GetSystemPaletteEntries,
+    .dc_funcs.pPutImage = boxeddrv_PutImage,
     .dc_funcs.pRealizeDefaultPalette = boxeddrv_RealizeDefaultPalette,
     .dc_funcs.pRealizePalette = boxeddrv_RealizePalette,
     .dc_funcs.pSetDeviceGammaRamp = boxeddrv_SetDeviceGammaRamp,
@@ -4669,8 +4706,10 @@ static const struct user_driver_funcs boxeddrv_funcs =
     .dc_funcs.pDeleteDC = boxeddrv_DeleteDC,
     .dc_funcs.pGetDeviceCaps = boxeddrv_GetDeviceCaps,
     .dc_funcs.pGetDeviceGammaRamp = boxeddrv_GetDeviceGammaRamp,
+    .dc_funcs.pGetImage = boxeddrv_GetImage,
     .dc_funcs.pGetNearestColor = boxeddrv_GetNearestColor,
     .dc_funcs.pGetSystemPaletteEntries = boxeddrv_GetSystemPaletteEntries,
+    .dc_funcs.pPutImage = boxeddrv_PutImage,
     .dc_funcs.pRealizeDefaultPalette = boxeddrv_RealizeDefaultPalette,
     .dc_funcs.pRealizePalette = boxeddrv_RealizePalette,
     .dc_funcs.pSetDeviceGammaRamp = boxeddrv_SetDeviceGammaRamp,
@@ -4735,8 +4774,10 @@ static const struct user_driver_funcs boxeddrv_funcs =
     .dc_funcs.pDeleteDC = boxeddrv_DeleteDC,
     .dc_funcs.pGetDeviceCaps = boxeddrv_GetDeviceCaps,
     .dc_funcs.pGetDeviceGammaRamp = boxeddrv_GetDeviceGammaRamp,
+    .dc_funcs.pGetImage = boxeddrv_GetImage,
     .dc_funcs.pGetNearestColor = boxeddrv_GetNearestColor,
     .dc_funcs.pGetSystemPaletteEntries = boxeddrv_GetSystemPaletteEntries,
+    .dc_funcs.pPutImage = boxeddrv_PutImage,
     .dc_funcs.pRealizeDefaultPalette = boxeddrv_RealizeDefaultPalette,
     .dc_funcs.pRealizePalette = boxeddrv_RealizePalette,
     .dc_funcs.pSetDeviceGammaRamp = boxeddrv_SetDeviceGammaRamp,
@@ -4800,8 +4841,10 @@ static const struct user_driver_funcs boxeddrv_funcs =
     .dc_funcs.pDeleteDC = boxeddrv_DeleteDC,
     .dc_funcs.pGetDeviceCaps = boxeddrv_GetDeviceCaps,
     .dc_funcs.pGetDeviceGammaRamp = boxeddrv_GetDeviceGammaRamp,
+    .dc_funcs.pGetImage = boxeddrv_GetImage,
     .dc_funcs.pGetNearestColor = boxeddrv_GetNearestColor,
     .dc_funcs.pGetSystemPaletteEntries = boxeddrv_GetSystemPaletteEntries,
+    .dc_funcs.pPutImage = boxeddrv_PutImage,
     .dc_funcs.pRealizeDefaultPalette = boxeddrv_RealizeDefaultPalette,
     .dc_funcs.pRealizePalette = boxeddrv_RealizePalette,
     .dc_funcs.pSetDeviceGammaRamp = boxeddrv_SetDeviceGammaRamp,
@@ -4864,8 +4907,10 @@ static const struct user_driver_funcs boxeddrv_funcs =
     .dc_funcs.pDeleteDC = boxeddrv_DeleteDC,
     .dc_funcs.pGetDeviceCaps = boxeddrv_GetDeviceCaps,
     .dc_funcs.pGetDeviceGammaRamp = boxeddrv_GetDeviceGammaRamp,
+    .dc_funcs.pGetImage = boxeddrv_GetImage,
     .dc_funcs.pGetNearestColor = boxeddrv_GetNearestColor,
     .dc_funcs.pGetSystemPaletteEntries = boxeddrv_GetSystemPaletteEntries,
+    .dc_funcs.pPutImage = boxeddrv_PutImage,
     .dc_funcs.pRealizeDefaultPalette = boxeddrv_RealizeDefaultPalette,
     .dc_funcs.pRealizePalette = boxeddrv_RealizePalette,
     .dc_funcs.pSetDeviceGammaRamp = boxeddrv_SetDeviceGammaRamp,
